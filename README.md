@@ -11,9 +11,9 @@ python3 -m venv .venv && source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m docling_offline prefetch-models --artifacts-path .artifacts --device cuda
-python -m docling_offline convert docs/Whitestone_page24.pdf --output out
+python -m docling_offline convert docs/sample.pdf --output out
 # add extra formats if you need them, e.g.:
-# python -m docling_offline convert docs/Whitestone_page24.pdf --output out --format md --format html
+# python -m docling_offline convert docs/sample.pdf --output out --format md --format html
 ```
 
 ## Installation
@@ -32,11 +32,11 @@ python -m docling_offline convert docs/Whitestone_page24.pdf --output out
 
 - Convert a single PDF to JSON (default format) with GPU acceleration:
   ```bash
-  python -m docling_offline convert docs/Whitestone_page24.pdf --output out --device cuda --artifacts-path .artifacts
+  python -m docling_offline convert docs/sample.pdf --output out --device cuda --artifacts-path .artifacts
   ```
 - Request every supported artifact in one go:
   ```bash
-  python -m docling_offline convert docs/Whitestone_page24.pdf \
+  python -m docling_offline convert docs/sample.pdf \
     --output out \
     --format json --format md --format html --format text --format doctags \
     --device cuda --artifacts-path .artifacts
