@@ -18,6 +18,7 @@ from .config import (
     SUPPORTED_OCR_ENGINES,
     format_list,
 )
+from .postprocess import export_tables_to_csv
 from .processor import ConversionResult, convert_documents, prefetch_models, summarize_results
 
 console = Console()
@@ -77,7 +78,10 @@ def convert_command(
         ["json"],
         "--format",
         "-f",
-        help=f"Output formats (choices: {', '.join(sorted(SUPPORTED_FORMATS))}). Repeat for multiple.",
+        help=(
+            f"Output formats (choices: {', '.join(sorted(SUPPORTED_FORMATS))} or 'all'). "
+            "Repeat for multiple."
+        ),
     ),
     artifacts_path: Path = typer.Option(
         ".artifacts/",
@@ -111,10 +115,30 @@ def convert_command(
         "--generate-page-images",
         help="Emit page-level images alongside HTML output.",
     ),
+    table_mode: str = typer.Option(
+        "fast",
+        "--table-mode",
+        help="TableFormer mode: fast|accurate.",
+    ),
+    table_cell_matching: bool = typer.Option(
+        True,
+        "--table-cell-matching/--no-table-cell-matching",
+        help="Enable Docling cell matching heuristics.",
+    ),
+    clip_table_overlap: bool = typer.Option(
+        True,
+        "--clip-table-overlap/--no-clip-table-overlap",
+        help="Trim TableFormer cells that spill into neighbouring tables when cell matching is disabled.",
+    ),
     fail_fast: bool = typer.Option(
         False,
         "--fail-fast",
         help="Stop on the first failure and exit with code 1.",
+    ),
+    export_tables_xlsx: bool = typer.Option(
+        False,
+        "--export-tables-xlsx/--no-export-tables-xlsx",
+        help="Write every table into a single Excel workbook per document.",
     ),
 ) -> None:
     """Convert one or more PDFs into offline-friendly formats."""
@@ -138,6 +162,10 @@ def convert_command(
             force_full_page_ocr=force_full_page_ocr,
             generate_page_images=generate_page_images,
             fail_fast=fail_fast,
+            table_mode=table_mode,
+            table_cell_matching=table_cell_matching,
+            clip_table_overlap=clip_table_overlap,
+            export_tables_xlsx=export_tables_xlsx,
         )
     except ConfigError as error:
         _handle_config_error(error)
@@ -176,8 +204,32 @@ def convert_command(
         f"[bold]{stats['succeeded']}[/bold] succeeded, [bold]{stats['failed']}[/bold] failed."
     )
     console.print(f"[dim]Elapsed time: {elapsed:.2f}s[/dim]")
-    if stats["failed"] > 0 and config.fail_fast:
+
+
+@app.command("extract-tables")
+def extract_tables_command(
+    doc_json: Path = typer.Argument(..., exists=True, dir_okay=False, resolve_path=True, help="Docling JSON file to pull tables from."),
+    output: Path = typer.Option(
+        Path("tables/"),
+        "--output",
+        "-o",
+        help="Directory where CSV files will be written.",
+    ),
+) -> None:
+    """Export every detected table inside a Docling JSON document as CSV."""
+
+    try:
+        csv_paths = export_tables_to_csv(doc_json, output)
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        console.print(f"[bold red]table extraction failed:[/bold red] {exc}")
         raise typer.Exit(code=1)
+
+    if not csv_paths:
+        console.print("No tables were found in the supplied JSON.")
+    else:
+        console.print(
+            f"[bold green]{len(csv_paths)}[/bold green] tables exported to [bold]{output}[/bold]."
+        )
 
 
 def _render_results(results: Sequence[ConversionResult], output_dir: Path) -> None:

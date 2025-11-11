@@ -1,0 +1,30 @@
+# CPU-only dependency stack for the Docling offline converter.
+# Install inside a Python 3.11 virtualenv with:
+#   pip install -r requirements-cpu.txt
+
+docling==2.0.0
+docling-core==2.0.0
+# Use the PyTorch CPU wheel index so `pip install -r requirements-cpu.txt`
+# automatically grabs the CPU-only builds.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.3.1
+torchvision==0.18.1
+typer[all]==0.12.5
+click==8.1.7
+rich==13.7.1
+pyyaml==6.0.1
+markdown==3.10
+openpyxl==3.1.5
+
+# Developer tooling
+black==24.4.2
+ruff==0.4.8
+pytest==8.2.2
+pytest-cov==5.0.0
+
+# OCR engines (optional; keep if you want OCR-backed conversions)
+easyocr==1.7.2
+pytesseract==0.3.13
+rapidocr-onnxruntime==1.4.4
+onnxruntime==1.23.2

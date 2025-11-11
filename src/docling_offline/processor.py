@@ -8,9 +8,10 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
 from dataclasses import dataclass
-from html import escape
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
+
+import yaml
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from docling.document_converter import DocumentConverter as _DocumentConverter
@@ -22,7 +23,14 @@ try:  # pragma: no cover - optional dependency
 except ImportError:  # pragma: no cover
     _render_markdown = None
 
-from .config import ConvertConfig, PrefetchConfig, output_paths_for
+from .config import ConvertConfig, PrefetchConfig, output_paths_for, safe_stem
+from .utils import (
+    ensure_tableformer_structure,
+    clip_overlapping_table_cells,
+    write_table_metadata,
+    export_tables_to_xlsx,
+    sanitize_table_bboxes,
+)
 
 @dataclass
 class ConversionResult:
@@ -37,11 +45,76 @@ def prefetch_models(config: PrefetchConfig) -> None:
 
     resources = _load_docling()
     StandardPdfPipeline = resources["StandardPdfPipeline"]
+    snapshot_download = resources.get("snapshot_download")
+    PathlibPath = resources["Path"]
 
-    StandardPdfPipeline.download_models_hf(
-        local_dir=config.artifacts_path,
-        force=False,
-    )
+    download_fn = getattr(StandardPdfPipeline, "download_models_hf", None)
+    if callable(download_fn):
+        try:
+            download_fn(local_dir=config.artifacts_path, force=False)
+            return
+        except Exception:
+            # Fall back to converter-based prefetch below
+            pass
+
+    if snapshot_download:
+        pipeline_defaults = StandardPdfPipeline.get_default_options()
+        layout_options = getattr(pipeline_defaults, "layout_options", None)
+        layout_spec = getattr(layout_options, "model_spec", None) if layout_options else None
+        artifacts_root = PathlibPath(config.artifacts_path)
+        hf_targets = []
+        if layout_spec is not None:
+            repo_folder = getattr(layout_spec, "model_repo_folder", None)
+            repo_id = getattr(layout_spec, "repo_id", None)
+            revision = getattr(layout_spec, "revision", "main")
+            if repo_id and repo_folder:
+                hf_targets.append(
+                    (
+                        repo_id,
+                        revision,
+                        artifacts_root / repo_folder,
+                    )
+                )
+        hf_targets.append(
+            (
+                "ds4sd/docling-models",
+                "v2.3.0",
+                artifacts_root / "ds4sd--docling-models",
+            )
+        )
+        for repo_id, revision, dest in hf_targets:
+            try:
+                dest.mkdir(parents=True, exist_ok=True)
+                snapshot_download(
+                    repo_id=repo_id,
+                    revision=revision,
+                    local_dir=str(dest),
+                    local_dir_use_symlinks=False,
+                    resume_download=True,
+                )
+            except Exception:
+                continue
+        ensure_tableformer_structure(artifacts_root)
+
+    try:
+        converter = _build_converter(
+            artifacts_path=config.artifacts_path,
+            device=config.device,
+            threads=config.threads,
+            layout_batch_size=4,
+            ocr_batch_size=4,
+            table_batch_size=4,
+            ocr="none",
+            ocr_langs=("en",),
+            force_full_page_ocr=False,
+            generate_page_images=False,
+            table_mode="fast",
+            table_cell_matching=True,
+        )
+        converter.convert(Path(__file__))
+    except Exception:
+        # We only needed the side effect of downloading models.
+        pass
 
 
 def convert_documents(config: ConvertConfig) -> List[ConversionResult]:
@@ -63,6 +136,8 @@ def convert_documents(config: ConvertConfig) -> List[ConversionResult]:
             ocr_langs=config.ocr_langs,
             force_full_page_ocr=config.force_full_page_ocr,
             generate_page_images=config.generate_page_images,
+            table_mode=config.table_mode,
+            table_cell_matching=config.table_cell_matching,
         )
         return [_convert_single(path, config, converter) for path in tasks]
 
@@ -105,6 +180,8 @@ def _convert_single_worker(path: Path, config: ConvertConfig) -> ConversionResul
         ocr_langs=config.ocr_langs,
         force_full_page_ocr=config.force_full_page_ocr,
         generate_page_images=config.generate_page_images,
+        table_mode=config.table_mode,
+        table_cell_matching=config.table_cell_matching,
     )
     return _convert_single(path, config, converter)
 
@@ -124,7 +201,30 @@ def _convert_single(path: Path, config: ConvertConfig, converter: _DocumentConve
                 message=f"conversion status {result.status.name.lower()}",
             )
         document = result.document
+        page_metadata = sanitize_table_bboxes(document)
+        clipped_cells_total = 0
+        clipped_by_table = {}
+        if not config.table_cell_matching and config.clip_table_overlap:
+            clipped_cells_total, clipped_by_table = clip_overlapping_table_cells(document)
         written = _export_document(document, config.formats, outputs)
+        metadata_path = config.output / f"{safe_stem(path)}.tables.json"
+        write_table_metadata(
+            document,
+            metadata_path,
+            clipping_enabled=(not config.table_cell_matching and config.clip_table_overlap),
+            clipped_cells_total=clipped_cells_total,
+            clipped_by_table=clipped_by_table,
+            table_mode=config.table_mode,
+            table_cell_matching=config.table_cell_matching,
+            formats=config.formats,
+            page_metadata=page_metadata,
+        )
+        written.append(metadata_path)
+        if config.export_tables_xlsx and "xlsx" not in config.formats:
+            xlsx_path = config.output / f"{safe_stem(path)}.tables.xlsx"
+            workbook = export_tables_to_xlsx(document, xlsx_path)
+            if workbook:
+                written.append(workbook)
         return ConversionResult(source=path, success=True, outputs=written)
     except Exception as exc:
         return ConversionResult(
@@ -139,28 +239,52 @@ def _export_document(document: object, formats: Sequence[str], outputs: Sequence
     written: List[Path] = []
     for fmt, target in zip(formats, outputs):
         target.parent.mkdir(parents=True, exist_ok=True)
+        created_path: Optional[Path] = None
         if fmt == "md":
             content = document.export_to_markdown()
             Path(target).write_text(content, encoding="utf-8")
+            created_path = Path(target)
         elif fmt == "text":
             content = document.export_to_text()
             Path(target).write_text(content, encoding="utf-8")
+            created_path = Path(target)
         elif fmt == "json":
             content = document.export_to_dict()
             Path(target).write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
+            created_path = Path(target)
         elif fmt == "html":
-            markdown_text = document.export_to_markdown()
-            if _render_markdown:
-                html_output = _render_markdown(markdown_text)
-            else:  # fallback
-                html_output = f"<pre>{escape(markdown_text)}</pre>"
+            html_method = getattr(document, "export_to_html", None)
+            if callable(html_method):
+                html_output = html_method()
+            else:
+                markdown_text = document.export_to_markdown()
+                if _render_markdown:
+                    html_output = _render_markdown(markdown_text)
+                else:
+                    html_output = markdown_text.replace("\n", "<br/>")
             Path(target).write_text(html_output, encoding="utf-8")
+            created_path = Path(target)
         elif fmt == "doctags":
-            content = document.export_to_document_tokens()
+            export_fn = getattr(document, "export_to_doctags", None)
+            if not callable(export_fn):
+                export_fn = getattr(document, "export_to_document_tokens", None)
+            if not callable(export_fn):
+                raise RuntimeError("Current docling build does not support doctags export.")
+            content = export_fn()
             Path(target).write_text(content, encoding="utf-8")
+            created_path = Path(target)
+        elif fmt == "yaml":
+            data = document.export_to_dict()
+            Path(target).write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+            created_path = Path(target)
+        elif fmt == "xlsx":
+            workbook = export_tables_to_xlsx(document, Path(target))
+            if workbook:
+                created_path = workbook
         else:
             raise RuntimeError(f"Format '{fmt}' is not supported by the installed docling version.")
-        written.append(target)
+        if created_path:
+            written.append(created_path)
     return written
 
 
@@ -176,6 +300,8 @@ def _build_converter(
     ocr_langs: Sequence[str],
     force_full_page_ocr: bool,
     generate_page_images: bool,
+    table_mode: str,
+    table_cell_matching: bool,
 ) -> _DocumentConverter:
     resources = _load_docling()
     DocumentConverter = resources["DocumentConverter"]
@@ -205,14 +331,44 @@ def _build_converter(
         raise RuntimeError(f"OCR mode '{ocr}' is not supported by the installed docling version.")
 
     pipeline_defaults = StandardPdfPipeline.get_default_options()
-    pipeline_options = pipeline_defaults.model_copy(
-        update={
-            "artifacts_path": artifacts_path,
-            "do_ocr": do_ocr,
-            "ocr_options": ocr_options,
-            "generate_page_images": generate_page_images,
-        }
+    pipeline_update = {
+        "artifacts_path": artifacts_path,
+        "do_ocr": do_ocr,
+        "ocr_options": ocr_options,
+        "generate_page_images": generate_page_images,
+    }
+    # Copy across legacy CLI knobs if Docling exposes them on the options model.
+    possible_fields = (
+        ("device", device),
+        ("threads", threads),
+        ("layout_batch_size", layout_batch_size),
+        ("ocr_batch_size", ocr_batch_size),
+        ("table_batch_size", table_batch_size),
+        ("force_full_page_ocr", force_full_page_ocr),
     )
+    for field, value in possible_fields:
+        if hasattr(pipeline_defaults, field):
+            pipeline_update[field] = value
+
+    TableFormerMode = resources.get("TableFormerMode")
+    TableStructureOptions = resources.get("TableStructureOptions")
+    if TableFormerMode and TableStructureOptions:
+        table_mode_enum = TableFormerMode.ACCURATE if table_mode == "accurate" else TableFormerMode.FAST
+        base_table_options = getattr(pipeline_defaults, "table_structure_options", None)
+        if base_table_options is None:
+            base_table_options = TableStructureOptions()
+        table_options = base_table_options.model_copy(
+            update={"mode": table_mode_enum, "do_cell_matching": table_cell_matching}
+        )
+        pipeline_update["table_structure_options"] = table_options
+    elif table_mode != "fast" or not table_cell_matching:
+        print(
+            "[docling-offline] WARNING: table-mode/table-cell-matching requested, "
+            "but the installed Docling package does not expose TableFormer APIs. "
+            "These flags will be ignored."
+        )
+
+    pipeline_options = pipeline_defaults.model_copy(update=pipeline_update)
 
     format_options = {
         InputFormat.PDF: FormatOption(
@@ -250,12 +406,32 @@ def _load_docling() -> Dict[str, Any]:
             TesseractCliOcrOptions,
             TesseractOcrOptions,
         )
+        try:  # Optional across docling releases
+            from docling.datamodel.pipeline_options import TableStructureOptions  # type: ignore
+        except ImportError:  # pragma: no cover
+            TableStructureOptions = None  # type: ignore
+        try:
+            from docling.datamodel.pipeline_options import TableFormerMode as _PipelineTableFormerMode  # type: ignore
+        except ImportError:  # pragma: no cover
+            _PipelineTableFormerMode = None  # type: ignore
+        if _PipelineTableFormerMode is not None:
+            TableFormerMode = _PipelineTableFormerMode
+        else:  # pragma: no cover - legacy fallback
+            try:
+                from docling.models.tableformer.tableformer_config import TableFormerMode  # type: ignore
+            except ImportError:
+                TableFormerMode = None  # type: ignore
         from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
         from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
             "docling is not installed or incompatible. Install dependencies via `pip install -r requirements.txt`."
         ) from exc
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        snapshot_download = None
 
     return {
         "DocumentConverter": DocumentConverter,
@@ -267,5 +443,9 @@ def _load_docling() -> Dict[str, Any]:
         "EasyOcrOptions": EasyOcrOptions,
         "TesseractCliOcrOptions": TesseractCliOcrOptions,
         "TesseractOcrOptions": TesseractOcrOptions,
+        "TableStructureOptions": TableStructureOptions,
+        "TableFormerMode": TableFormerMode,
         "ConversionStatus": ConversionStatus,
+        "snapshot_download": snapshot_download,
+        "Path": Path,
     }

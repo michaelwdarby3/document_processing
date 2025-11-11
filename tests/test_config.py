@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from docling_offline.config import ConfigError, ConvertConfig, PrefetchConfig, safe_stem
+from docling_offline.config import ALL_FORMATS, ConfigError, ConvertConfig, PrefetchConfig, safe_stem
 
 
 def test_convert_config_discovers_pdfs(tmp_path: Path) -> None:
@@ -39,3 +39,17 @@ def test_convert_config_requires_pdf(tmp_path: Path) -> None:
 
 def test_safe_stem_normalizes_path() -> None:
     assert safe_stem(Path("Demo Report.pdf")) == "Demo_Report"
+
+
+def test_convert_config_all_formats_keyword(tmp_path: Path) -> None:
+    pdf = tmp_path / "alpha.pdf"
+    pdf.write_bytes(b"%PDF-1.7 stub")
+
+    config = ConvertConfig(
+        inputs=(pdf,),
+        output=tmp_path / "out",
+        formats=("ALL",),
+        artifacts_path=tmp_path / ".artifacts",
+    )
+
+    assert config.formats == ALL_FORMATS

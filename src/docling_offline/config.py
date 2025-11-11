@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Sequence, Set, Tuple
 
-SUPPORTED_FORMATS: Set[str] = {"md", "json", "html", "text", "doctags"}
+SUPPORTED_FORMATS: Set[str] = {"md", "json", "html", "text", "doctags", "yaml", "xlsx"}
+ALL_FORMATS: Tuple[str, ...] = tuple(sorted(SUPPORTED_FORMATS))
 SUPPORTED_DEVICES: Set[str] = {"auto", "cuda", "mps", "cpu"}
 SUPPORTED_OCR_ENGINES: Set[str] = {
     "none",
@@ -63,6 +64,10 @@ class ConvertConfig:
     force_full_page_ocr: bool = False
     generate_page_images: bool = False
     fail_fast: bool = False
+    table_mode: str = "fast"
+    table_cell_matching: bool = True
+    clip_table_overlap: bool = False
+    export_tables_xlsx: bool = False
     discovered_inputs: Tuple[Path, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -72,7 +77,14 @@ class ConvertConfig:
         output_path = _normalize_path(self.output)
         object.__setattr__(self, "output", output_path)
 
-        normalized_formats = tuple(_normalize_format(fmt) for fmt in self.formats)
+        raw_formats = tuple(fmt.strip() for fmt in self.formats if fmt and fmt.strip())
+        if not raw_formats:
+            raise ConfigError("At least one output format must be supplied.")
+
+        if any(fmt.lower() == "all" for fmt in raw_formats):
+            normalized_formats = ALL_FORMATS
+        else:
+            normalized_formats = tuple(_normalize_format(fmt) for fmt in raw_formats)
         if not normalized_formats:
             raise ConfigError("At least one output format must be supplied.")
         object.__setattr__(self, "formats", normalized_formats)
@@ -98,6 +110,11 @@ class ConvertConfig:
         if not langs:
             raise ConfigError("At least one OCR language is required.")
         object.__setattr__(self, "ocr_langs", langs)
+
+        table_mode_normalized = self.table_mode.strip().lower()
+        if table_mode_normalized not in {"fast", "accurate"}:
+            raise ConfigError("table_mode must be one of: fast, accurate.")
+        object.__setattr__(self, "table_mode", table_mode_normalized)
 
         discovered = tuple(sorted(_discover_inputs(normalized_inputs)))
         if not discovered:

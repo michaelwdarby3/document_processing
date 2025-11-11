@@ -72,6 +72,22 @@ class StubPdfDocumentBackend:
     pass
 
 
+class StubTableStructureOptions:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def model_copy(self, update=None):
+        data = dict(self.kwargs)
+        if update:
+            data.update(update)
+        return StubTableStructureOptions(**data)
+
+
+class StubTableFormerMode:
+    FAST = "fast"
+    ACCURATE = "accurate"
+
+
 class StubStandardPdfPipeline:
     calls = 0
 
@@ -116,6 +132,10 @@ def stub_docling(monkeypatch: pytest.MonkeyPatch) -> Dict[str, object]:
         "TesseractCliOcrOptions": StubTesseractCliOcrOptions,
         "TesseractOcrOptions": StubTesseractOcrOptions,
         "ConversionStatus": StubConversionStatus,
+        "TableStructureOptions": StubTableStructureOptions,
+        "TableFormerMode": StubTableFormerMode,
+        "snapshot_download": None,
+        "Path": Path,
     }
 
     monkeypatch.setattr(processor, "_load_docling", lambda: resources)
