@@ -248,7 +248,7 @@ def test_export_tables_to_xlsx(tmp_path: Path) -> None:
 
 def test_table_title_skips_garbled_heading() -> None:
     table = StubTable(
-        bbox=StubBBox(l=0, t=10, r=10, b=0, coord_origin=CoordOrigin.BOTTOMLEFT),
+        bbox=StubBBox(l=0, t=10, r=60, b=0, coord_origin=CoordOrigin.BOTTOMLEFT),
         page_no=1,
         cells=[],
         num_cols=1,
@@ -265,13 +265,13 @@ def test_table_title_skips_garbled_heading() -> None:
 
 def test_table_title_uses_enum_heading_label() -> None:
     table = StubTable(
-        bbox=StubBBox(l=0, t=10, r=10, b=0, coord_origin=CoordOrigin.BOTTOMLEFT),
+        bbox=StubBBox(l=0, t=10, r=60, b=0, coord_origin=CoordOrigin.BOTTOMLEFT),
         page_no=2,
         cells=[],
         num_cols=1,
     )
     heading = StubText(
-        bbox=StubBBox(l=0, t=40, r=10, b=30, coord_origin=CoordOrigin.BOTTOMLEFT),
+        bbox=StubBBox(l=0, t=80, r=60, b=60, coord_origin=CoordOrigin.BOTTOMLEFT),
         page_no=2,
         text="Enum Heading Title",
         label=FakeLabel("section_header"),
