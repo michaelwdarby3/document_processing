@@ -10,6 +10,13 @@ def test_export_tables_to_csv(tmp_path: Path) -> None:
     doc = {
         "tables": [
             {
+                "label": "table",
+                "prov": [
+                    {
+                        "page_no": 1,
+                        "bbox": {"l": 0, "t": 40, "r": 60, "b": 0, "coord_origin": "BOTTOMLEFT"},
+                    }
+                ],
                 "data": {
                     "grid": [
                         [
@@ -27,7 +34,19 @@ def test_export_tables_to_csv(tmp_path: Path) -> None:
                     ]
                 }
             }
-        ]
+        ],
+        "texts": [
+            {
+                "label": "section_header",
+                "text": "Demo Heading",
+                "prov": [
+                    {
+                        "page_no": 1,
+                        "bbox": {"l": 0, "t": 55, "r": 60, "b": 45, "coord_origin": "BOTTOMLEFT"},
+                    }
+                ],
+            }
+        ],
     }
 
     json_path = tmp_path / "doc.json"
@@ -43,5 +62,7 @@ def test_export_tables_to_csv(tmp_path: Path) -> None:
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.reader(handle))
 
-    assert rows[0] == ["[COLUMN HEADER] Header A", "[COLUMN HEADER] Header B"]
-    assert rows[1] == ["[ROW HEADER] Row 1", "Value 1"]
+    assert rows[0] == ["Demo Heading"]
+    assert rows[1] == []
+    assert rows[2] == ["[COLUMN HEADER] Header A", "[COLUMN HEADER] Header B"]
+    assert rows[3] == ["[ROW HEADER] Row 1", "Value 1"]

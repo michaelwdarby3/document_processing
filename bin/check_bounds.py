@@ -74,7 +74,9 @@ def show_table_boxes(
             else:
                 color = "blue"
             ax.add_patch(plt.Rectangle((x, y), width, height, fill=False, edgecolor=color, linewidth=1))
-            ax.text(x, y, (cell.get("text") or "")[:20], fontsize=6, color=color)
+            snippet = (cell.get("text") or "")[:20]
+            snippet = snippet.replace("\n", " ").replace("\r", " ").replace("$", r"\$")
+            ax.text(x, y, snippet, fontsize=6, color=color, usetex=False)
 
     ax.set_title(f"Table {table_index} on page {page_index}")
     backend = matplotlib.get_backend().lower()

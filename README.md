@@ -4,6 +4,8 @@
 
 JSON is the default export format; specify `--format` flags to add Markdown, HTML, YAML, Excel (`--format xlsx`), or other outputs. Use `--format all` to emit every supported artifact (including the Excel workbook) in a single run.
 
+Whenever Docling encounters a table whose text stream looks mangled (e.g., custom-encoded glyphs), the CLI automatically re-runs EasyOCR on that page and splices the OCR’d table back into the outputs. The metadata file (`*.tables.json`) records which tables were flagged/repaired.
+
 ## Quickstart
 
 ```bash
@@ -96,6 +98,12 @@ python -m docling_offline convert docs/sample.pdf --output out --device cpu --ar
     --table-mode accurate --table-cell-matching \
     --device cpu --artifacts-path .artifacts
   ```
+- Re-run only the tables that look garbled (automated OCR repair):
+  ```bash
+  ./scripts/repair_tables.py docs/Whitestone_Facility_Maintenance_And_Repair_Cost_Reference_2009-2010.pdf \
+    repaired_out --format json xlsx
+  ```
+  This wrapper runs the normal conversion, detects tables with noisy encodings, reprocesses just those pages with EasyOCR, and emits repaired JSON/XLSX/metadata.
 - Convert a directory recursively:
   ```bash
   python -m docling_offline convert docs --output out --format json --device cuda

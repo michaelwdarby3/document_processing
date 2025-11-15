@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
+from .utils import _table_title_from_json
+
 
 def export_tables_to_csv(doc_json: Path, output_dir: Path) -> List[Path]:
     """Extract every table from a Docling JSON payload into standalone CSV files.
@@ -29,6 +31,10 @@ def export_tables_to_csv(doc_json: Path, output_dir: Path) -> List[Path]:
 
     for idx, table in enumerate(tables, start=1):
         rows = _table_rows(table)
+        title = _table_title_from_json(table, idx, data)
+        if title:
+            rows.insert(0, [title])
+            rows.insert(1, [])
         if not rows:
             continue
         csv_name = f"{doc_json.stem}_table_{idx:02d}.csv"

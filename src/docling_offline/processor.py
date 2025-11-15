@@ -9,7 +9,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
+import logging
+import numpy as np
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Set
 
 import yaml
 
@@ -30,7 +32,12 @@ from .utils import (
     write_table_metadata,
     export_tables_to_xlsx,
     sanitize_table_bboxes,
+    detect_garbled_tables,
+    merge_repaired_tables,
+    _write_text_with_fallback,
 )
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversionResult:
@@ -201,11 +208,31 @@ def _convert_single(path: Path, config: ConvertConfig, converter: _DocumentConve
                 message=f"conversion status {result.status.name.lower()}",
             )
         document = result.document
+        suspect_map, suspect_indexes = detect_garbled_tables(document)
+        repaired_tables: Set[int] = set()
         page_metadata = sanitize_table_bboxes(document)
+        if suspect_map:
+            logger.warning(
+                "Table text looked garbled on pages: %s",
+                ", ".join(str(p) for p in sorted(suspect_map.keys())),
+            )
+            repaired_tables = _repair_tables_with_ocr(path, config, suspect_map, document)
+            if repaired_tables:
+                page_metadata = sanitize_table_bboxes(document)
+            fallback = _fallback_cell_ocr(path, config, suspect_map, document)
+            if fallback:
+                repaired_tables.update(fallback)
+                page_metadata = sanitize_table_bboxes(document)
         clipped_cells_total = 0
-        clipped_by_table = {}
+        clipped_by_table: Dict[int, int] = {}
         if not config.table_cell_matching and config.clip_table_overlap:
             clipped_cells_total, clipped_by_table = clip_overlapping_table_cells(document)
+            if clipped_cells_total:
+                page_metadata = sanitize_table_bboxes(document)
+            if clipped_cells_total:
+                logger.info("Clipped %d cells due to overlapping tables", clipped_cells_total)
+        if not suspect_map:
+            logger.info("No garbled tables detected")
         written = _export_document(document, config.formats, outputs)
         metadata_path = config.output / f"{safe_stem(path)}.tables.json"
         write_table_metadata(
@@ -218,6 +245,8 @@ def _convert_single(path: Path, config: ConvertConfig, converter: _DocumentConve
             table_cell_matching=config.table_cell_matching,
             formats=config.formats,
             page_metadata=page_metadata,
+            garbled_tables=suspect_indexes,
+            repaired_tables=repaired_tables,
         )
         written.append(metadata_path)
         if config.export_tables_xlsx and "xlsx" not in config.formats:
@@ -242,16 +271,14 @@ def _export_document(document: object, formats: Sequence[str], outputs: Sequence
         created_path: Optional[Path] = None
         if fmt == "md":
             content = document.export_to_markdown()
-            Path(target).write_text(content, encoding="utf-8")
-            created_path = Path(target)
+            created_path = _write_text_with_fallback(Path(target), content, encoding="utf-8")
         elif fmt == "text":
             content = document.export_to_text()
-            Path(target).write_text(content, encoding="utf-8")
-            created_path = Path(target)
+            created_path = _write_text_with_fallback(Path(target), content, encoding="utf-8")
         elif fmt == "json":
             content = document.export_to_dict()
-            Path(target).write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
-            created_path = Path(target)
+            payload = json.dumps(content, ensure_ascii=False, indent=2)
+            created_path = _write_text_with_fallback(Path(target), payload, encoding="utf-8")
         elif fmt == "html":
             html_method = getattr(document, "export_to_html", None)
             if callable(html_method):
@@ -262,8 +289,7 @@ def _export_document(document: object, formats: Sequence[str], outputs: Sequence
                     html_output = _render_markdown(markdown_text)
                 else:
                     html_output = markdown_text.replace("\n", "<br/>")
-            Path(target).write_text(html_output, encoding="utf-8")
-            created_path = Path(target)
+            created_path = _write_text_with_fallback(Path(target), html_output, encoding="utf-8")
         elif fmt == "doctags":
             export_fn = getattr(document, "export_to_doctags", None)
             if not callable(export_fn):
@@ -271,16 +297,15 @@ def _export_document(document: object, formats: Sequence[str], outputs: Sequence
             if not callable(export_fn):
                 raise RuntimeError("Current docling build does not support doctags export.")
             content = export_fn()
-            Path(target).write_text(content, encoding="utf-8")
-            created_path = Path(target)
+            created_path = _write_text_with_fallback(Path(target), content, encoding="utf-8")
         elif fmt == "yaml":
             data = document.export_to_dict()
-            Path(target).write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
-            created_path = Path(target)
+            payload = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+            created_path = _write_text_with_fallback(Path(target), payload, encoding="utf-8")
         elif fmt == "xlsx":
-            workbook = export_tables_to_xlsx(document, Path(target))
-            if workbook:
-                created_path = workbook
+            workbook_path = export_tables_to_xlsx(document, Path(target))
+            if workbook_path:
+                created_path = workbook_path
         else:
             raise RuntimeError(f"Format '{fmt}' is not supported by the installed docling version.")
         if created_path:
@@ -379,6 +404,151 @@ def _build_converter(
     }
 
     return DocumentConverter(format_options=format_options)
+
+
+def _repair_tables_with_ocr(pdf_path: Path, config: ConvertConfig, suspect_map: Dict[int, List[int]], document: Any) -> Set[int]:
+    if not suspect_map:
+        return set()
+    repair_converter = _build_converter(
+        artifacts_path=config.artifacts_path,
+        device=config.device,
+        threads=config.threads,
+        layout_batch_size=config.layout_batch_size,
+        ocr_batch_size=config.ocr_batch_size,
+        table_batch_size=config.table_batch_size,
+        ocr="easyocr",
+        ocr_langs=config.ocr_langs,
+        force_full_page_ocr=True,
+        generate_page_images=config.generate_page_images,
+        table_mode=config.table_mode,
+        table_cell_matching=config.table_cell_matching,
+    )
+    repaired_tables: Set[int] = set()
+    weights_missing = False
+    for page_no, table_indexes in suspect_map.items():
+        logger.info("Running OCR repair on page %d for tables %s", page_no, table_indexes)
+        try:
+            result = repair_converter.convert(pdf_path, page_range=(page_no, page_no))
+        except FileNotFoundError as exc:
+            logger.error("OCR repair failed on page %d: %s", page_no, exc)
+            logger.error(
+                "EasyOCR weights are missing. Enable downloads once (network required) via "
+                "`python -m docling_offline prefetch-models --device %s --artifacts-path %s` "
+                "or run EasyOCR manually to populate %s.",
+                config.device,
+                config.artifacts_path,
+                exc.filename or "the EasyOCR cache",
+            )
+            weights_missing = True
+            break
+        except Exception as exc:
+            logger.error("OCR repair failed on page %d: %s", page_no, exc)
+            continue
+        repair_doc = result.document
+        sanitize_table_bboxes(repair_doc)
+        replaced = merge_repaired_tables(document, repair_doc, table_indexes, page_no)
+        repaired_tables.update(replaced)
+        if replaced:
+            logger.info("Replaced %d tables on page %d via OCR", len(replaced), page_no)
+        else:
+            logger.warning("OCR repair on page %d produced no matching tables", page_no)
+    if weights_missing and len(repaired_tables) < len(suspect_map):
+        logger.warning("Skipping remaining OCR repairs because EasyOCR weights are unavailable.")
+    return repaired_tables
+
+
+def _fallback_cell_ocr(
+    pdf_path: Path,
+    config: ConvertConfig,
+    tables_by_page: Dict[int, List[int]],
+    document: Any,
+) -> Set[int]:
+    if not tables_by_page:
+        return set()
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:  # pragma: no cover
+        logger.error("pypdfium2 is required for cell-level OCR repairs but is not installed.")
+        return set()
+    try:
+        from easyocr import Reader
+    except ImportError:  # pragma: no cover
+        logger.error("easyocr is required for cell-level OCR repairs but is not installed.")
+        return set()
+
+    gpu = config.device.startswith("cuda")
+    reader = Reader(
+        list(config.ocr_langs),
+        gpu=gpu,
+        model_storage_directory=str(config.artifacts_path / "EasyOcr"),
+        download_enabled=False,
+    )
+    pdf_doc = pdfium.PdfDocument(str(pdf_path))
+    repaired: Set[int] = set()
+    scale = 4.0
+
+    for page_no, indexes in tables_by_page.items():
+        logger.info("Running fallback cell OCR on page %d for tables %s", page_no, indexes)
+        try:
+            page = pdf_doc[page_no - 1]
+        except IndexError:
+            logger.error("Page %d not found in PDF; skipping cell-level OCR.", page_no)
+            continue
+        renderer = page.render(scale=scale)
+        pil_image = renderer.to_pil()
+        page_width = page.get_width()
+        page_height = page.get_height()
+        changed_tables = 0
+        for table_index in indexes:
+            try:
+                table = document.tables[table_index]
+            except IndexError:
+                continue
+            data = getattr(table, "data", None)
+            if data is None:
+                continue
+            changed = False
+            for cell in getattr(data, "table_cells", []) or []:
+                bbox = getattr(cell, "bbox", None)
+                if bbox is None:
+                    continue
+                top_bbox = (
+                    bbox
+                    if getattr(bbox, "coord_origin", None) == getattr(bbox, "coord_origin", None).__class__.TOPLEFT
+                    else bbox.to_top_left_origin(page_height)
+                )
+                x0 = max(int(top_bbox.l * scale), 0)
+                y0 = max(int(top_bbox.t * scale), 0)
+                x1 = min(int(top_bbox.r * scale), pil_image.width)
+                y1 = min(int(top_bbox.b * scale), pil_image.height)
+                if x1 - x0 < 6 or y1 - y0 < 6:
+                    continue
+                crop = pil_image.crop((x0, y0, x1, y1))
+                crop = crop.convert("L")
+                crop_arr = np.asarray(crop)
+                if crop_arr.size == 0:
+                    continue
+                results = reader.readtext(crop_arr, detail=0, paragraph=True)
+                ocr_text = " ".join(results).strip()
+                if _looks_reasonable(ocr_text) and ocr_text != getattr(cell, "text", ""):
+                    cell.text = ocr_text
+                    changed = True
+            if changed:
+                repaired.add(table_index)
+                changed_tables += 1
+        if changed_tables:
+            logger.info("Rewrote %d tables on page %d via fallback cell OCR.", changed_tables, page_no)
+        else:
+            logger.warning("Fallback cell OCR on page %d did not improve any tables.", page_no)
+    return repaired
+
+
+def _looks_reasonable(text: str) -> bool:
+    if not text:
+        return False
+    printable = sum(1 for ch in text if ch.isprintable())
+    alnum = sum(1 for ch in text if ch.isalnum())
+    return printable / len(text) > 0.5 and alnum / len(text) > 0.2
 
 
 def summarize_results(results: Sequence[ConversionResult]) -> Dict[str, int]:
