@@ -1,0 +1,18 @@
+# Local Claude Code Notes (template)
+
+Copy this file to `CLAUDE.local.md` (gitignored) and fill in machine-specific notes.
+
+## Local venv paths (example)
+
+- GPU venv: `.venv/` at repo root (CUDA 12.1)
+- CPU-only venv: `.venv-cpu/` at repo root
+
+## Model cache location (example)
+
+- Docling model cache: `~/.cache/docling/` or wherever `prefetch-models` landed them
+
+## Claude Code routines (example)
+
+| Routine | ID | Schedule | Purpose |
+|---|---|---|---|
+| Doc drift | `trig_...` | Daily | Flag drift between code and docs |

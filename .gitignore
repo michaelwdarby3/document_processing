@@ -12,3 +12,6 @@ out/
 .DS_Store
 coverage.xml
 .coverage
+
+# Machine-local Claude Code doc (maintainer-specific paths, routine IDs)
+CLAUDE.local.md
