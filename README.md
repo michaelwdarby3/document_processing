@@ -85,7 +85,7 @@ python -m docling_offline convert docs/sample.pdf --output out --device cpu --ar
   ```
 - Convert a long PDF to every format with overlap clipping and metadata (replace with your file path):
   ```bash
-  python -m docling_offline convert docs/Whitestone_Facility_Maintenance_And_Repair_Cost_Reference_2009-2010.pdf \
+  python -m docling_offline convert docs/sample.pdf \
     --output out_nomatch \
     --format all \
     --table-mode accurate --no-table-cell-matching \
@@ -100,7 +100,7 @@ python -m docling_offline convert docs/sample.pdf --output out --device cpu --ar
   ```
 - Re-run only the tables that look garbled (automated OCR repair):
   ```bash
-  ./scripts/repair_tables.py docs/Whitestone_Facility_Maintenance_And_Repair_Cost_Reference_2009-2010.pdf \
+  ./scripts/repair_tables.py docs/sample.pdf \
     repaired_out --format json xlsx
   ```
   This wrapper runs the normal conversion, detects tables with noisy encodings, reprocesses just those pages with EasyOCR, and emits repaired JSON/XLSX/metadata.
